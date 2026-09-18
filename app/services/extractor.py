@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from app.config import settings
 from app.schemas import EntityExtractionResult, ExtractedEntities
+from app.services.grounding import ground_entities
 
 
 class EntityExtractionError(RuntimeError):
@@ -59,7 +60,7 @@ Rules:
 """
 
 
-# This schema contains only fields supported by Gemini's structured output API.
+# Use only fields supported by Gemini's structured output API.
 EXTRACTION_RESPONSE_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
     properties={
@@ -93,7 +94,6 @@ EXTRACTION_RESPONSE_SCHEMA = types.Schema(
 )
 
 
-# Successful results are cached briefly to avoid duplicate API calls.
 _EXTRACTION_CACHE: dict[str, tuple[float, EntityExtractionResult]] = {}
 _CACHE_LOCK = Lock()
 
@@ -110,7 +110,7 @@ def _create_cache_key(text: str) -> str:
 def _get_cached_result(
     cache_key: str,
 ) -> EntityExtractionResult | None:
-    """Return a cached result when it has not expired."""
+    """Return an independent copy of an unexpired cached result."""
 
     current_time = time.monotonic()
 
@@ -133,7 +133,7 @@ def _store_cached_result(
     cache_key: str,
     result: EntityExtractionResult,
 ) -> None:
-    """Cache a successful extraction result."""
+    """Cache a validated extraction result."""
 
     expires_at = time.monotonic() + settings.cache_ttl_seconds
 
@@ -206,7 +206,7 @@ def _parse_model_response(response: object) -> ExtractedEntities:
 def _calculate_confidence(
     entities: ExtractedEntities,
 ) -> float:
-    """Estimate confidence from required-field completeness."""
+    """Calculate a completeness heuristic, not a correctness probability."""
 
     required_values = (
         entities.department,
@@ -265,7 +265,7 @@ def _retry_delay(attempt_number: int) -> float:
 
     base_delay = (
         settings.llm_retry_base_seconds
-        * (2**attempt_number)
+        * (2 ** attempt_number)
     )
 
     return base_delay + random.uniform(0.0, 0.25)
@@ -276,7 +276,7 @@ def call_model(
     model_name: str,
     user_content: str,
 ) -> ExtractedEntities:
-    """Call one Gemini model and return validated entities."""
+    """Call one Gemini model and return schema-validated entities."""
 
     response = client.models.generate_content(
         model=model_name,
@@ -299,7 +299,7 @@ def call_model(
 
 
 def extract_entities(text: str) -> EntityExtractionResult:
-    """Extract appointment fields using Gemini with retry and fallback."""
+    """Extract source-grounded entities with retry, fallback and caching."""
 
     if not isinstance(text, str):
         raise EntityExtractionError(
@@ -341,6 +341,9 @@ def extract_entities(text: str) -> EntityExtractionResult:
                         user_content=user_content,
                     )
 
+                    # Unsupported schedule phrases require clarification.
+                    entities = ground_entities(cleaned_text, entities)
+
                     result = EntityExtractionResult(
                         entities=entities,
                         confidence=_calculate_confidence(entities),
@@ -377,13 +380,7 @@ def extract_entities(text: str) -> EntityExtractionResult:
                         )
                         break
 
-                    if status_code in {
-                        408,
-                        500,
-                        502,
-                        503,
-                        504,
-                    }:
+                    if status_code in {408, 500, 502, 503, 504}:
                         failure_messages.append(
                             f"{model_name}: temporary API failure "
                             f"({status_code}: {message})"
@@ -432,7 +429,7 @@ def extract_entities(text: str) -> EntityExtractionResult:
                             f"{settings.llm_timeout_seconds} seconds"
                         )
 
-                        # Move directly to the fallback after a timeout.
+                        # Skip additional attempts after a timeout.
                         break
 
                     if _is_network_error(error):
