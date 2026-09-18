@@ -2,6 +2,14 @@
 
 A FastAPI backend that converts typed or image-based appointment requests into structured scheduling data.
 
+## Live Demo
+
+- **Interactive API Documentation:** https://appointment-scheduler-x2hc.onrender.com/docs
+- **Health Check:** https://appointment-scheduler-x2hc.onrender.com/health
+- **Base API URL:** https://appointment-scheduler-x2hc.onrender.com
+
+> The service runs on a free Render instance and may require up to one minute to wake after inactivity.
+
 The service implements the complete pipeline required by the assignment:
 
 ```text
