@@ -8,25 +8,57 @@ import unicodedata
 from app.schemas import ExtractedEntities
 
 
-_TOKEN_PATTERN = re.compile(r"[^\W\d_]+|\d+|[:/+\-]", re.UNICODE)
+_TOKEN_PATTERN = re.compile(
+    r"[^\W\d_]+|\d+|[:/+\-]",
+    re.UNICODE,
+)
+
+_NEXT_WEEKDAY_TYPO = re.compile(
+    r"\bnxt(?=\s+(?:monday|tuesday|wednesday|thursday|friday|"
+    r"saturday|sunday)\b)"
+)
 
 _DATE_MODIFIERS = {
-    "next", "this", "last", "following", "coming",
-    "after", "before",
+    "next",
+    "this",
+    "last",
+    "following",
+    "coming",
+    "after",
+    "before",
 }
 
 _TIME_MODIFIERS = {
-    "around", "about", "approximately", "after", "before",
-    "between", "from", "by",
+    "around",
+    "about",
+    "approximately",
+    "after",
+    "before",
+    "between",
+    "from",
+    "by",
 }
 
 
 def _tokens(value: str) -> tuple[str, ...]:
-    """Ignore casing and harmless spacing without calculating dates."""
+    """Normalize formatting and a narrowly defined weekday abbreviation."""
 
     cleaned = unicodedata.normalize("NFKC", value).casefold()
-    cleaned = re.sub(r"\ba\s*\.\s*m\s*\.?", "am", cleaned)
-    cleaned = re.sub(r"\bp\s*\.\s*m\s*\.?", "pm", cleaned)
+
+    # Permit this explicit alias, not arbitrary fuzzy date/time repair.
+    cleaned = _NEXT_WEEKDAY_TYPO.sub("next", cleaned)
+
+    cleaned = re.sub(
+        r"\ba\s*\.\s*m\s*\.?",
+        "am",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"\bp\s*\.\s*m\s*\.?",
+        "pm",
+        cleaned,
+    )
+
     return tuple(_TOKEN_PATTERN.findall(cleaned))
 
 
@@ -35,7 +67,7 @@ def _is_supported(
     phrase: str,
     modifiers: set[str],
 ) -> bool:
-    """Require a contiguous source span without dropping a leading modifier."""
+    """Require a source span without dropping a leading modifier."""
 
     candidate = _tokens(phrase)
 
@@ -48,7 +80,7 @@ def _is_supported(
         if source[start:start + length] != candidate:
             continue
 
-        # "Friday" must not silently replace "next Friday", for example.
+        # "Friday" must not silently replace "next Friday".
         if start > 0 and source[start - 1] in modifiers:
             continue
 

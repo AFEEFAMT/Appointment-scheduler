@@ -1,3 +1,5 @@
+"""Normalize appointment dates and times using explicit scheduling rules."""
+
 import re
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -108,21 +110,32 @@ def normalize_date_phrase(
         return result, 1.0
 
     weekday_match = re.fullmatch(
-        r"(?:(?:next|this)\s+)?"
+        r"(?:(next|this|nxt)\s+)?"
         r"(monday|tuesday|wednesday|thursday|friday|"
         r"saturday|sunday)",
         phrase,
     )
 
     if weekday_match:
-        target_weekday = WEEKDAYS[weekday_match.group(1)]
-        days_ahead = (
-            target_weekday - reference.weekday()
-        ) % 7
+        modifier = weekday_match.group(1)
+        target_weekday = WEEKDAYS[weekday_match.group(2)]
 
-        # Always select a future occurrence.
-        if days_ahead == 0:
-            days_ahead = 7
+        if modifier == "this":
+            # The current week runs from Monday through Sunday.
+            days_ahead = target_weekday - reference.weekday()
+
+            if days_ahead < 0:
+                raise NormalizationError(
+                    "Appointment date is in the past"
+                )
+        else:
+            days_ahead = (
+                target_weekday - reference.weekday()
+            ) % 7
+
+            # "Next" excludes today; an unqualified weekday may mean today.
+            if modifier in {"next", "nxt"} and days_ahead == 0:
+                days_ahead = 7
 
         return (
             reference.date() + timedelta(days=days_ahead),
@@ -200,7 +213,6 @@ def normalize_time_phrase(
     phrase = clean_phrase(time_phrase)
     phrase = re.sub(r"^(?:at|@)\s*", "", phrase)
 
-    # Handle precise named times before ambiguity checks.
     if phrase == "noon":
         return time(12, 0), 1.0
 
@@ -214,7 +226,6 @@ def normalize_time_phrase(
     ):
         raise NormalizationError("Appointment time is ambiguous")
 
-    # Convert a.m./p.m. into am/pm.
     phrase = phrase.replace(".", "")
 
     twelve_hour_match = re.fullmatch(

@@ -22,7 +22,8 @@ The cloud deployment runs independently of the developer's computer. The hosting
 - Structured Gemini extraction with Pydantic validation
 - Configurable model fallback, timeouts, and retries
 - Source-grounding checks for extracted date/time phrases
-- Department alias resolution and conservative typo correction
+- Conservative support for `nxt` before a full weekday name
+- Department alias resolution and typo correction
 - Deterministic normalization in `Asia/Kolkata`
 - Clarification for missing, ambiguous, or past scheduling details
 - Upload size, pixel-count, and image-integrity checks
@@ -108,9 +109,17 @@ Model access and availability depend on the configured Gemini account.
 
 ### Source grounding
 
-Date/time phrases must match a contiguous span in the source text after conservative casing, spacing, and punctuation normalization.
+Extracted date/time phrases must match a contiguous span in the source text after conservative casing, spacing, and punctuation normalization.
 
 The check also rejects some dropped leading modifiers, such as extracting `Friday` from `next Friday`. Unsupported schedule phrases are removed and require clarification.
+
+The explicit abbreviation `nxt` is treated as `next` only immediately before a full weekday name. This accommodates the assignment example:
+
+```text
+book dentist nxt Friday @ 3 pm
+```
+
+This narrowly defined equivalence does not permit arbitrary fuzzy repair of dates or times.
 
 Grounding verifies source support, not complete semantic correctness.
 
@@ -121,7 +130,7 @@ Validation checks required fields, resolves department aliases, and respects ext
 Date/time normalization is independent of Gemini. Supported examples include:
 
 - `today`, `tomorrow`, and `day after tomorrow`
-- `next Friday`
+- `Friday`, `this Friday`, `next Friday`, and `nxt Friday`
 - `2026-09-25`
 - `25 Sep 2026`
 - `September 25, 2026`
@@ -129,6 +138,25 @@ Date/time normalization is independent of Gemini. Supported examples include:
 - `noon` and `midnight`
 
 Covered ambiguous expressions, including `next week`, `morning`, and `09/10/2026`, request clarification. Past appointments are rejected.
+
+#### Weekday policy
+
+- `this Friday` refers to Friday in the current Monday–Sunday week, including today when today is Friday.
+- If that current-week date has passed, clarification is required.
+- `next Friday` selects the next Friday strictly after today.
+- Other `next` weekdays follow the same next-occurrence rule, not a blanket next-calendar-week rule.
+- An unqualified weekday, such as `Friday`, selects the next occurrence including today.
+- If today's requested time has elapsed, clarification is required rather than silently moving the appointment a week forward.
+- `nxt Friday` follows the same rule as `next Friday`.
+
+For example, with a reference of Friday, 18 September 2026 at noon:
+
+| Request | Result |
+| --- | --- |
+| `this Friday at 3pm` | 18 September 2026 at 15:00 |
+| `Friday at 3pm` | 18 September 2026 at 15:00 |
+| `next Friday at 3pm` | 25 September 2026 at 15:00 |
+| `this Friday at 11am` | Clarification: requested time has passed |
 
 ## Project Organization
 
@@ -144,6 +172,7 @@ Covered ambiguous expressions, including `next week`, `morning`, and `09/10/2026
 | `app/services/normalizer.py` | Deterministic date/time normalization |
 | `app/services/pipeline.py` | Shared processing orchestration |
 | `tests/` | Automated tests |
+| `tests/test_schedule_regressions.py` | Weekday-policy and OCR-abbreviation regressions |
 | `tests/fixtures/images/` | Synthetic OCR fixtures |
 | `scripts/generate_test_images.py` | Fixture generation |
 | `Dockerfile` | Container setup, including Tesseract |
@@ -335,10 +364,12 @@ The health endpoint reports process liveness; it does not verify Gemini credenti
 Latest verified local result:
 
 ```text
-152 passed, 2 warnings in 10.50s
+171 passed, 2 warnings in 9.36s
 ```
 
-The warnings concern dependency deprecations in the test-client stack. No tests failed in that run.
+The weekday and OCR-abbreviation regression suite passed all 19 cases.
+
+The warnings concern dependency deprecations in the test-client stack. No tests failed in that run. Execution time varies by environment.
 
 Run all tests:
 
@@ -350,6 +381,12 @@ Run extractor and grounding tests:
 
 ```powershell
 python -m pytest tests/test_grounding.py tests/test_extractor.py -q
+```
+
+Run schedule regressions:
+
+```powershell
+python -m pytest tests/test_schedule_regressions.py -q
 ```
 
 Check installed dependency compatibility:
@@ -367,11 +404,15 @@ Coverage includes:
 - Configurable low-confidence OCR guardrails
 - Department aliases and typo correction
 - Date/time normalization and past-appointment rejection
+- Current-week versus next-occurrence weekday rules
 - Gemini response parsing, retries, fallback, timeout, and quota handling
 - Cache expiration and result-copy isolation
 - Source-grounding regression cases
+- The assignment's `nxt Friday` example through the shared pipeline with a stubbed Gemini call
 
 Extractor tests mock Gemini. Passing tests does not establish live provider availability or universal OCR accuracy.
+
+The noisy-abbreviation pipeline tests begin with text representing OCR output; they do not independently verify that Tesseract reads a photographed abbreviation correctly.
 
 ### Generate fixtures
 
@@ -404,6 +445,7 @@ After each deployment, verify:
 2. Complete typed request
 3. Missing-details clarification
 4. Image request using an included fixture
+5. Same-day `this Friday` and `nxt Friday` requests using a fixed reference datetime
 
 Local tests do not substitute for deployed endpoint checks.
 
@@ -413,6 +455,8 @@ Local tests do not substitute for deployed endpoint checks.
 - Text and image inputs reuse one processing pipeline.
 - Missing or uncertain details request clarification rather than guessed scheduling values.
 - Date/time source checks run before normalization.
+- Explicit weekday rules avoid silently moving elapsed appointments forward.
+- OCR-abbreviation handling is narrowly defined rather than unrestricted fuzzy matching.
 - Configurable timeouts and retry counts bound individual model attempts.
 - Short-lived caching reduces duplicate extraction calls.
 
