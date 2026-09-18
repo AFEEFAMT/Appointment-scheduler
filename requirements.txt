@@ -1,0 +1,17 @@
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+pydantic==2.13.5
+pydantic-settings==2.15.0
+python-multipart==0.0.32
+python-dotenv>=1.1,<2
+google-genai==2.24.0
+pytesseract==0.3.13
+Pillow==12.3.0
+opencv-python-headless==5.0.0.93
+numpy==2.5.3
+dateparser==1.4.3
+tzdata==2026.4
+rapidfuzz>=3.14,<4
+httpx>=0.28,<1
+pytest==9.1.1
+pytest-cov==7.1.0
