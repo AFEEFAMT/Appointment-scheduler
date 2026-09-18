@@ -5,13 +5,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Application settings loaded from environment variables."""
+    """Application configuration loaded from environment variables."""
 
     gemini_api_key: SecretStr = SecretStr("")
 
-    gemini_primary_model: str = "gemini-3.8-flash"
+    gemini_primary_model: str = "gemini-3.6-flash"
     gemini_fallback_models: str = (
-        "gemini-3.5-flash,gemini-2.5-flash"
+        "gemini-3.1-flash-lite,gemini-3.5-flash-lite"
     )
 
     app_timezone: str = "Asia/Kolkata"
@@ -23,8 +23,8 @@ class Settings(BaseSettings):
         le=1.0,
     )
 
-    llm_timeout_seconds: float = Field(default=20, ge=5, le=120)
-    llm_max_retries: int = Field(default=2, ge=0, le=5)
+    llm_timeout_seconds: float = Field(default=30, ge=5, le=120)
+    llm_max_retries: int = Field(default=1, ge=0, le=5)
     llm_retry_base_seconds: float = Field(
         default=1.0,
         ge=0.1,
@@ -42,7 +42,7 @@ class Settings(BaseSettings):
 
     @property
     def gemini_model_chain(self) -> tuple[str, ...]:
-        """Return primary and fallback models in execution order."""
+        """Return configured models in order, removing duplicates."""
 
         fallback_models = [
             model.strip()
@@ -62,16 +62,23 @@ class Settings(BaseSettings):
 
         api_key = self.gemini_api_key.get_secret_value().strip()
 
+        placeholders = {
+            "your_key_here",
+            "your_real_api_key",
+            "your_api_key",
+            "replace_with_your_gemini_api_key",
+        }
+
         return bool(
             api_key
-            and api_key != "your_key_here"
+            and api_key.casefold() not in placeholders
             and "PASTE_" not in api_key
         )
 
 
 @lru_cache
 def get_settings() -> Settings:
-    """Create and cache one settings object."""
+    """Create and cache the application settings."""
 
     return Settings()
 

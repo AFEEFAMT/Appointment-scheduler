@@ -1,9 +1,10 @@
-"""Coordinate OCR, extraction, validation, and normalization."""
+"""Coordinate OCR, extraction, validation and normalization."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.config import settings
 from app.schemas import (
     Appointment,
     ClarificationResponse,
@@ -30,7 +31,7 @@ PipelineResponse = SuccessResponse | ClarificationResponse
 
 @dataclass(frozen=True)
 class PipelineResult:
-    """Response and diagnostic information produced by the pipeline."""
+    """Public response and internal processing trace."""
 
     response: PipelineResponse
     trace: PipelineTrace
@@ -38,28 +39,47 @@ class PipelineResult:
 
 def _create_trace(
     ocr_result: OCRResult,
-    extraction_result: EntityExtractionResult,
+    extraction_result: EntityExtractionResult | None = None,
     normalized: NormalizedSchedule | None = None,
     normalization_confidence: float | None = None,
 ) -> PipelineTrace:
-    """Create a trace describing the completed pipeline stages."""
+    """Record completed stages without fabricating skipped results."""
 
     return PipelineTrace(
         ocr=ocr_result,
         extraction=extraction_result,
         normalized=normalized,
         normalization_confidence=normalization_confidence,
-        models_attempted=[extraction_result.model_used],
+        models_attempted=(
+            [extraction_result.model_used]
+            if extraction_result is not None
+            else []
+        ),
     )
 
 
 def _normalization_clarification_message(
     error: NormalizationError,
 ) -> str:
-    """Convert normalization failures into useful clarification questions."""
+    """Turn normalization failures into relevant clarification messages."""
 
     message = str(error).strip().rstrip(".")
     lowered_message = message.casefold()
+
+    if "reference datetime" in lowered_message:
+        return (
+            "Please provide a valid ISO-8601 reference_datetime "
+            "or omit it to use the current date and time."
+        )
+
+    if (
+        "past" in lowered_message
+        or "not in the future" in lowered_message
+    ):
+        return (
+            f"{message}. Please provide a future "
+            "appointment date and time."
+        )
 
     if "time" in lowered_message:
         return (
@@ -67,9 +87,10 @@ def _normalization_clarification_message(
             "such as 3pm or 15:00."
         )
 
-    if "date" in lowered_message or "past" in lowered_message:
+    if "date" in lowered_message:
         return (
-            f"{message}. Please provide a specific future appointment date."
+            f"{message}. Please provide a specific "
+            "future appointment date."
         )
 
     return (
@@ -81,9 +102,29 @@ def _run_pipeline(
     ocr_result: OCRResult,
     reference_datetime: str | None = None,
 ) -> PipelineResult:
-    """Run the common processing stages for text and image inputs."""
+    """Run shared processing stages with an early image-confidence gate."""
 
-    extraction_result = extract_entities(ocr_result.raw_text)
+    if (
+        ocr_result.engine != "typed_text"
+        and ocr_result.confidence
+        < settings.ocr_confidence_threshold
+    ):
+        return PipelineResult(
+            response=ClarificationResponse(
+                message=(
+                    "The image text could not be read reliably. "
+                    "Please upload a clearer image or confirm the "
+                    "appointment details using typed text."
+                )
+            ),
+            trace=_create_trace(
+                ocr_result=ocr_result,
+            ),
+        )
+
+    extraction_result = extract_entities(
+        ocr_result.raw_text
+    )
 
     combined_confidence = min(
         ocr_result.confidence,
@@ -96,17 +137,17 @@ def _run_pipeline(
     )
 
     if not validation_result.is_valid:
-        trace = _create_trace(
-            ocr_result=ocr_result,
-            extraction_result=extraction_result,
-        )
-
         return PipelineResult(
             response=ClarificationResponse(
-                message=validation_result.clarification_question
-                or "Please clarify the appointment details."
+                message=(
+                    validation_result.clarification_question
+                    or "Please clarify the appointment details."
+                )
             ),
-            trace=trace,
+            trace=_create_trace(
+                ocr_result=ocr_result,
+                extraction_result=extraction_result,
+            ),
         )
 
     entities = validation_result.entities
@@ -116,16 +157,16 @@ def _run_pipeline(
         or entities.date_phrase is None
         or entities.time_phrase is None
     ):
-        trace = _create_trace(
-            ocr_result=ocr_result,
-            extraction_result=extraction_result,
-        )
-
         return PipelineResult(
             response=ClarificationResponse(
-                message="Please provide the department, date, and time."
+                message=(
+                    "Please provide the department, date, and time."
+                )
             ),
-            trace=trace,
+            trace=_create_trace(
+                ocr_result=ocr_result,
+                extraction_result=extraction_result,
+            ),
         )
 
     try:
@@ -135,16 +176,16 @@ def _run_pipeline(
             reference_datetime=reference_datetime,
         )
     except NormalizationError as error:
-        trace = _create_trace(
-            ocr_result=ocr_result,
-            extraction_result=extraction_result,
-        )
-
         return PipelineResult(
             response=ClarificationResponse(
-                message=_normalization_clarification_message(error)
+                message=_normalization_clarification_message(
+                    error
+                )
             ),
-            trace=trace,
+            trace=_create_trace(
+                ocr_result=ocr_result,
+                extraction_result=extraction_result,
+            ),
         )
 
     appointment = Appointment(
@@ -154,18 +195,16 @@ def _run_pipeline(
         tz=normalized.tz,
     )
 
-    trace = _create_trace(
-        ocr_result=ocr_result,
-        extraction_result=extraction_result,
-        normalized=normalized,
-        normalization_confidence=normalization_confidence,
-    )
-
     return PipelineResult(
         response=SuccessResponse(
             appointment=appointment,
         ),
-        trace=trace,
+        trace=_create_trace(
+            ocr_result=ocr_result,
+            extraction_result=extraction_result,
+            normalized=normalized,
+            normalization_confidence=normalization_confidence,
+        ),
     )
 
 
@@ -175,10 +214,8 @@ def process_text(
 ) -> PipelineResult:
     """Process a typed appointment request."""
 
-    ocr_result = create_typed_text_result(text)
-
     return _run_pipeline(
-        ocr_result=ocr_result,
+        ocr_result=create_typed_text_result(text),
         reference_datetime=reference_datetime,
     )
 

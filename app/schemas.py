@@ -70,7 +70,7 @@ class ExtractedEntities(StrictSchema):
 
 
 class EntityExtractionResult(StrictSchema):
-    """Validated output from the entity extraction stage."""
+    """Validated entities and a heuristic completeness score."""
 
     entities: ExtractedEntities
     confidence: float = Field(
@@ -94,7 +94,7 @@ class NormalizedSchedule(StrictSchema):
 
 
 class Appointment(StrictSchema):
-    """Final structured appointment."""
+    """Final structured scheduling data."""
 
     department: str = Field(
         min_length=1,
@@ -108,14 +108,14 @@ class Appointment(StrictSchema):
 
 
 class SuccessResponse(StrictSchema):
-    """Response returned for a valid appointment."""
+    """Response returned for a valid appointment request."""
 
     appointment: Appointment
     status: Literal["ok"] = "ok"
 
 
 class ClarificationResponse(StrictSchema):
-    """Response returned when more information is required."""
+    """Response returned when additional information is required."""
 
     status: Literal["needs_clarification"] = (
         "needs_clarification"
@@ -140,7 +140,7 @@ class ServiceErrorResponse(StrictSchema):
 
 
 class HealthResponse(StrictSchema):
-    """Health information returned by the API."""
+    """Process health information returned by the API."""
 
     status: Literal["ok"] = "ok"
     service: str
@@ -148,16 +148,21 @@ class HealthResponse(StrictSchema):
 
 
 class PipelineTrace(StrictSchema):
-    """Internal diagnostic information for a pipeline execution."""
+    """Diagnostic information for completed pipeline stages."""
 
     ocr: OCRResult
-    extraction: EntityExtractionResult
+
+    # None indicates that extraction was skipped by an early guardrail.
+    extraction: EntityExtractionResult | None = None
+
     normalized: NormalizedSchedule | None = None
+
     normalization_confidence: float | None = Field(
         default=None,
         ge=0.0,
         le=1.0,
     )
+
     models_attempted: list[str] = Field(
         default_factory=list,
     )

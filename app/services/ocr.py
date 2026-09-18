@@ -1,3 +1,5 @@
+"""Extract appointment text from typed input and uploaded images."""
+
 from dataclasses import dataclass
 from io import BytesIO
 
@@ -21,12 +23,32 @@ MAX_IMAGE_PIXELS = 20_000_000
 
 
 class OCRProcessingError(ValueError):
-    """Raised when an image cannot be safely processed."""
+    """Raised when input cannot be processed."""
+
+    status_code = 422
+
+
+class UnsupportedImageTypeError(OCRProcessingError):
+    """Raised when an upload has an unsupported media type."""
+
+    status_code = 415
+
+
+class ImageSizeLimitError(OCRProcessingError):
+    """Raised when an image exceeds byte or pixel limits."""
+
+    status_code = 413
+
+
+class OCRUnavailableError(OCRProcessingError):
+    """Raised when the OCR engine is unavailable."""
+
+    status_code = 503
 
 
 @dataclass(frozen=True)
 class OCRCandidate:
-    """One OCR result from a preprocessing/PSM combination."""
+    """Result from one preprocessing and segmentation configuration."""
 
     text: str
     confidence: float
@@ -35,12 +57,13 @@ class OCRCandidate:
 
     @property
     def selection_score(self) -> float:
-        """Balance OCR confidence with extracted text completeness."""
+        """Combine word confidence with a capped text-length bonus."""
 
-        completeness = min(len(self.text) / 100, 1.0)
+        length_bonus = min(len(self.text) / 100, 1.0)
 
-        return (self.confidence * 0.90) + (
-            completeness * 0.10
+        return (
+            self.confidence * 0.90
+            + length_bonus * 0.10
         )
 
 
@@ -58,12 +81,17 @@ def tesseract_is_available() -> bool:
 
 
 def create_typed_text_result(text: str) -> OCRResult:
-    """Create an OCR-compatible result for directly typed text."""
+    """Convert typed text into the shared input representation."""
 
     cleaned_text = " ".join(text.split())
 
     if not cleaned_text:
         raise OCRProcessingError("Input text is empty")
+
+    if len(cleaned_text) > 10_000:
+        raise OCRProcessingError(
+            "Input text exceeds the 10,000-character limit"
+        )
 
     return OCRResult(
         raw_text=cleaned_text,
@@ -77,7 +105,7 @@ def validate_image_input(
     image_bytes: bytes,
     content_type: str | None,
 ) -> None:
-    """Validate image type and upload size before decoding."""
+    """Validate upload media type and size before decoding."""
 
     normalized_type = (
         content_type.split(";")[0].strip().lower()
@@ -86,51 +114,74 @@ def validate_image_input(
     )
 
     if normalized_type not in ALLOWED_IMAGE_TYPES:
-        raise OCRProcessingError(
+        raise UnsupportedImageTypeError(
+            "Unsupported image type. "
             "Only PNG, JPEG and WebP images are supported"
         )
 
     if not image_bytes:
-        raise OCRProcessingError("Uploaded image is empty")
+        raise OCRProcessingError(
+            "Uploaded image is empty"
+        )
 
-    maximum_bytes = settings.max_image_size_mb * 1024 * 1024
+    maximum_bytes = (
+        settings.max_image_size_mb * 1024 * 1024
+    )
 
     if len(image_bytes) > maximum_bytes:
-        raise OCRProcessingError(
-            f"Image exceeds the {settings.max_image_size_mb} MB limit"
+        raise ImageSizeLimitError(
+            f"Image exceeds the "
+            f"{settings.max_image_size_mb} MB size limit"
         )
 
 
 def decode_image(image_bytes: bytes) -> np.ndarray:
-    """Decode an image safely and correct its EXIF orientation."""
+    """Validate dimensions, decode pixels and correct EXIF orientation."""
 
     try:
-        with Image.open(BytesIO(image_bytes)) as image:
-            image.load()
-            image = ImageOps.exif_transpose(image).convert("RGB")
+        with Image.open(BytesIO(image_bytes)) as source:
+            width, height = source.size
 
-            width, height = image.size
-
+            # Inspect dimensions before allocating decoded pixel buffers.
             if width * height > MAX_IMAGE_PIXELS:
-                raise OCRProcessingError(
+                raise ImageSizeLimitError(
                     "Image dimensions are too large"
                 )
 
-            rgb_image = np.array(image)
+            source.load()
+
+            oriented = ImageOps.exif_transpose(source)
+            rgb_image = np.array(
+                oriented.convert("RGB")
+            )
+
+    except Image.DecompressionBombError as error:
+        raise ImageSizeLimitError(
+            "Image dimensions exceed safe processing limits"
+        ) from error
 
     except (
         UnidentifiedImageError,
         OSError,
-        Image.DecompressionBombError,
+        SyntaxError,
+        ValueError,
     ) as error:
+        if isinstance(error, OCRProcessingError):
+            raise
+
         raise OCRProcessingError(
             "Uploaded file is not a readable image"
         ) from error
 
-    return cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
+    return cv2.cvtColor(
+        rgb_image,
+        cv2.COLOR_RGB2BGR,
+    )
 
 
-def resize_small_image(image: np.ndarray) -> np.ndarray:
+def resize_small_image(
+    image: np.ndarray,
+) -> np.ndarray:
     """Upscale small images to improve character recognition."""
 
     height, width = image.shape[:2]
@@ -139,7 +190,10 @@ def resize_small_image(image: np.ndarray) -> np.ndarray:
     if largest_dimension >= 1400:
         return image
 
-    scale = min(1400 / largest_dimension, 3.0)
+    scale = min(
+        1400 / largest_dimension,
+        3.0,
+    )
 
     return cv2.resize(
         image,
@@ -150,8 +204,10 @@ def resize_small_image(image: np.ndarray) -> np.ndarray:
     )
 
 
-def deskew_image(grayscale: np.ndarray) -> np.ndarray:
-    """Correct moderate image rotation before OCR."""
+def deskew_image(
+    grayscale: np.ndarray,
+) -> np.ndarray:
+    """Correct moderate rotation before OCR."""
 
     _, binary = cv2.threshold(
         grayscale,
@@ -174,7 +230,6 @@ def deskew_image(grayscale: np.ndarray) -> np.ndarray:
     else:
         skew_angle = raw_angle
 
-    # Avoid damaging images with unreliable large-angle estimates.
     if abs(skew_angle) < 0.3 or abs(skew_angle) > 15:
         return grayscale
 
@@ -200,10 +255,14 @@ def deskew_image(grayscale: np.ndarray) -> np.ndarray:
 def create_preprocessing_variants(
     image: np.ndarray,
 ) -> dict[str, np.ndarray]:
-    """Create complementary image variants for OCR voting."""
+    """Create complementary preprocessing variants for OCR selection."""
 
     resized = resize_small_image(image)
-    grayscale = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+
+    grayscale = cv2.cvtColor(
+        resized,
+        cv2.COLOR_BGR2GRAY,
+    )
     grayscale = deskew_image(grayscale)
 
     grayscale = cv2.copyMakeBorder(
@@ -220,6 +279,7 @@ def create_preprocessing_variants(
         clipLimit=2.0,
         tileGridSize=(8, 8),
     )
+
     enhanced = clahe.apply(grayscale)
 
     denoised = cv2.fastNlMeansDenoising(
@@ -259,7 +319,7 @@ def run_tesseract_candidate(
     variant: str,
     page_segmentation_mode: int,
 ) -> OCRCandidate | None:
-    """Run one Tesseract configuration and calculate real confidence."""
+    """Run Tesseract and compute character-weighted word confidence."""
 
     configuration = (
         f"--oem 3 --psm {page_segmentation_mode} "
@@ -303,13 +363,14 @@ def run_tesseract_candidate(
         words.append(word)
 
         character_count = max(len(word), 1)
-        weighted_confidence += confidence * character_count
+        weighted_confidence += (
+            confidence * character_count
+        )
         total_characters += character_count
 
     if not words or total_characters == 0:
         return None
 
-    extracted_text = " ".join(words)
     normalized_confidence = (
         weighted_confidence / total_characters
     ) / 100
@@ -320,7 +381,7 @@ def run_tesseract_candidate(
     )
 
     return OCRCandidate(
-        text=extracted_text,
+        text=" ".join(words),
         confidence=normalized_confidence,
         variant=variant,
         page_segmentation_mode=page_segmentation_mode,
@@ -331,12 +392,15 @@ def extract_text_from_image(
     image_bytes: bytes,
     content_type: str | None,
 ) -> OCRResult:
-    """Run multi-pass OCR and return the strongest candidate."""
+    """Run multi-pass OCR and return the highest-scoring candidate."""
 
-    validate_image_input(image_bytes, content_type)
+    validate_image_input(
+        image_bytes,
+        content_type,
+    )
 
     if not tesseract_is_available():
-        raise OCRProcessingError(
+        raise OCRUnavailableError(
             "Tesseract OCR is not available"
         )
 
@@ -345,7 +409,7 @@ def extract_text_from_image(
 
     candidates: list[OCRCandidate] = []
 
-    # PSM 6: one text block. PSM 11: sparse text.
+    # PSM 6 handles a text block; PSM 11 handles sparse text.
     configurations = [
         ("grayscale", 6),
         ("grayscale", 11),
@@ -374,6 +438,12 @@ def extract_text_from_image(
         candidates,
         key=lambda candidate: candidate.selection_score,
     )
+
+    if len(best_candidate.text) > 10_000:
+        raise OCRProcessingError(
+            "Extracted text exceeds the "
+            "10,000-character limit"
+        )
 
     return OCRResult(
         raw_text=best_candidate.text,
